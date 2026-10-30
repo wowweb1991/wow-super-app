@@ -47,3 +47,27 @@ The preview pricing is **not** a payment checkout; no real payments or external 
 Before accepting payments: integrate a payment processor using verified signed webhooks,
 idempotent fulfillment, refund handling, admin reconciliation, and secure production auth.
 For scale: migrate SQLite to PostgreSQL, add queues/rate limits, object storage and monitoring.
+
+## October 2026 update — Rewards and featured businesses
+
+Added:
+- `/api/quran/daily` curated daily verse excerpt with Quran.com source link.
+- `/api/rewards/wallet` referral code, verification progress, balances, terms.
+- `/api/rewards/withdraw` GCash QR image claim (PNG/JPEG/WebP, <=350 KB), pending manual approval.
+- `/api/rewards/claims` user claim history.
+- `/api/admin/rewards` and `/api/admin/rewards/decision` for authenticated admins.
+- Featured business links and pages `/static/wow-nina.html` and `/static/wow-web-studio.html`, including WOW SHOP Gumroad checkout links.
+
+**NOT production-ready for cash rewards:** Claims are stored but no money is sent. All welcome bonuses and referrals start pending; admin must verify. The admin interface is API-only at `/api/docs`, with authenticated bearer token; there is no admin dashboard UI. Set an admin role securely in your own database after identity verification. Do not promote guaranteed rewards until policies, verification, and payout budget are ready. Current QR images are stored in SQLite and should be moved to private protected storage with deletion/retention rules before launch. Add rate limiting, stronger abuse detection, legal terms, and a privacy policy.
+
+**CRITICAL Render database warning:** SQLite on Render ephemeral storage can lose data on redeploy/restart. Before live use, migrate user accounts, referrals and rewards to persistent Postgres/Supabase or mount a properly configured persistent disk, and back up existing data. This ZIP does NOT contain or migrate your live Render database. Do not overwrite live data.
+
+**Logo assets:** The uploaded ZIP contained only WOW SUPER APP logo and hero image, not the original WOW NINA, WOW WEB STUDIO and WOW SHOP uploaded images. The featured pages therefore use text branding and verified user-supplied Facebook/Gumroad links. Add original logos after providing those files as part of a project bundle. Do not substitute image-search logos.
+
+**Google Play:** This is a FastAPI web project, NOT an Android `.aab` build. A native Android shell (e.g. TWA/PWA with proper installability) and Play policy review, testing, store listing and signing remain required. Rewards and digital purchase rules must be reviewed before publishing.
+
+
+## WOW JOBS
+Any signed-in user can publish jobs at /jobs. Public listings are unverified; applicants can submit messages/contact details, owners can view applications and close posts, and users can report suspicious listings. API: GET/POST /api/jobs, GET /api/jobs/mine, DELETE /api/jobs/{id}, POST /api/jobs/{id}/apply, GET /api/jobs/{id}/applications, POST /api/jobs/{id}/report, GET /api/admin/jobs/reports.
+
+**Deployment caution:** SQLite data on Render ephemeral storage can be lost on redeploy. Configure persistent database storage before accepting real accounts, jobs or applications. The Jobs page expects the same bearer token used by the main app, under localStorage key `wow_token` or `token`; if the frontend uses a different key, align it before launch. Test authorization and job flows in staging.
