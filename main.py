@@ -1,6 +1,6 @@
 import os, sqlite3, secrets, hashlib, hmac, time, base64, re
 from contextlib import contextmanager
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -250,6 +250,22 @@ def rewards_withdraw(data:QRClaim,authorization:str|None=Header(None)):
         c.execute('INSERT INTO reward_claims(user_id,amount,qr_data,created_at) VALUES (?,?,?,?)',(u['id'],available,data.qr_image_data_url,int(time.time())))
     return {'status':'pending','amount_php':available,'message':'Request submitted. Admin verification and manual payout required.'}
 
+@app.post('/api/rewards/withdraw-messenger')
+def rewards_withdraw_messenger(authorization:str|None=Header(None)):
+    """Reserve verified balance; user separately sends GCash QR to official Messenger."""
+    u=user(authorization)
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        ensure_rewards(c,u['id'])
+        w=c.execute('SELECT welcome_approved FROM reward_wallets WHERE user_id=?',(u['id'],)).fetchone()
+        n=c.execute("SELECT COUNT(*) n FROM referrals WHERE referrer_id=? AND status='approved'",(u['id'],)).fetchone()['n']
+        reserved=c.execute("SELECT COALESCE(SUM(amount),0) n FROM reward_claims WHERE user_id=? AND status IN ('pending','approved','paid')",(u['id'],)).fetchone()['n']
+        available=50*w['welcome_approved']+10*n-reserved
+        if available<100:raise HTTPException(400,'Minimum withdrawal is ₱100 in approved rewards.')
+        claim=c.execute('INSERT INTO reward_claims(user_id,amount,qr_data,created_at) VALUES (?,?,?,?)',(u['id'],available,'MESSENGER_QR_PENDING',int(time.time())))
+        claim_id=claim.lastrowid
+    return {'status':'pending','claim_id':claim_id,'amount_php':available,'message':'Send GCash QR via official WOW WEB STUDIO Facebook Messenger, including claim ID and registered email. Admin verifies before manual payout.'}
+
 @app.get('/api/rewards/claims')
 def my_reward_claims(authorization:str|None=Header(None)):
     u=user(authorization)
@@ -275,7 +291,7 @@ def admin_claim_qr(claim_id:int,authorization:str|None=Header(None)):
     admin_only(authorization)
     with conn() as c: row=c.execute('SELECT qr_data FROM reward_claims WHERE id=?',(claim_id,)).fetchone()
     if not row:raise HTTPException(404)
-    return {'image_data_url':row['qr_data']}
+    return {'image_data_url':None if row['qr_data']=='MESSENGER_QR_PENDING' else row['qr_data'], 'via_messenger':row['qr_data']=='MESSENGER_QR_PENDING'}
 
 class RewardDecision(BaseModel):
     kind:str
@@ -407,3 +423,273 @@ def admin_job_reports(authorization:str|None=Header(None)):
     admin_only(authorization)
     with conn() as c: rows=c.execute('SELECT r.id,r.job_id,r.reason,r.created_at,j.title FROM job_reports r JOIN jobs j ON j.id=r.job_id ORDER BY r.created_at DESC LIMIT 200').fetchall()
     return [dict(r) for r in rows]
+
+
+# WOW NINA product catalog (admin managed)
+def init_nina():
+    with conn() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS nina_products (id INTEGER PRIMARY KEY, title TEXT NOT NULL, brand TEXT NOT NULL, price REAL NOT NULL, sizes TEXT NOT NULL, stock INTEGER NOT NULL, condition TEXT NOT NULL, description TEXT NOT NULL, image_path TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)""")
+init_nina()
+
+class NinaProduct(BaseModel):
+    title:str
+    brand:str=''
+    price:float=Field(ge=0,le=100000000)
+    sizes:str=''
+    stock:int=Field(ge=0,le=1000000)
+    condition:str='Brand New'
+    description:str=''
+    active:bool=True
+
+@app.get('/api/wow-nina/products')
+def nina_list(admin:bool=False, authorization:str|None=Header(None)):
+    if admin: admin_only(authorization)
+    with conn() as c:
+        rows=c.execute('SELECT * FROM nina_products '+('' if admin else 'WHERE active=1 ' )+'ORDER BY created_at DESC,id DESC').fetchall()
+    return {'products':[dict(r) for r in rows]}
+
+@app.post('/api/admin/wow-nina/products')
+def nina_create(data:NinaProduct,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('INSERT INTO nina_products(title,brand,price,sizes,stock,condition,description,created_at,active) VALUES (?,?,?,?,?,?,?,?,?)',(limited(data.title,120),data.brand[:80],data.price,data.sizes[:150],data.stock,data.condition[:40],data.description[:1500],int(time.time()),int(data.active)))
+        return {'ok':True,'id':cur.lastrowid}
+
+@app.put('/api/admin/wow-nina/products/{pid}')
+def nina_update(pid:int,data:NinaProduct,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE nina_products SET title=?,brand=?,price=?,sizes=?,stock=?,condition=?,description=?,active=? WHERE id=?',(limited(data.title,120),data.brand[:80],data.price,data.sizes[:150],data.stock,data.condition[:40],data.description[:1500],int(data.active),pid))
+        if not cur.rowcount: raise HTTPException(404,'Product not found')
+    return {'ok':True}
+
+@app.delete('/api/admin/wow-nina/products/{pid}')
+def nina_delete(pid:int,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        c.execute('UPDATE nina_products SET active=0 WHERE id=?',(pid,))
+    return {'ok':True}
+
+@app.post('/api/admin/wow-nina/products/{pid}/photo')
+async def nina_photo(pid:int,photo:UploadFile=File(...),authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        if not c.execute('SELECT id FROM nina_products WHERE id=?',(pid,)).fetchone(): raise HTTPException(404,'Product not found')
+    import io
+    from PIL import Image, UnidentifiedImageError
+    raw=await photo.read(5*1024*1024+1)
+    if len(raw)>5*1024*1024: raise HTTPException(413,'Max photo size is 5 MB')
+    try:
+        im=Image.open(io.BytesIO(raw)); im.verify()
+        im=Image.open(io.BytesIO(raw)).convert('RGB'); im.thumbnail((1400,1400))
+    except (UnidentifiedImageError,ValueError,OSError): raise HTTPException(400,'Invalid image')
+    folder=os.getenv('UPLOAD_DIR',os.path.join(BASE,'static','uploads'))
+    os.makedirs(folder,exist_ok=True)
+    filename='nina_'+str(pid)+'_'+secrets.token_hex(8)+'.webp'
+    im.save(os.path.join(folder,filename),'WEBP',quality=82)
+    # Serve via dedicated route so UPLOAD_DIR can live outside the app tree.
+    with conn() as c: c.execute('UPDATE nina_products SET image_path=? WHERE id=?',(filename,pid))
+    return {'ok':True,'image_url':'/api/wow-nina/photo/'+filename}
+
+@app.get('/api/wow-nina/photo/{filename}')
+def nina_serve_photo(filename:str):
+    if not re.fullmatch(r'nina_[0-9]+_[0-9a-f]{16}\.webp',filename): raise HTTPException(404,'Not found')
+    folder=os.getenv('UPLOAD_DIR',os.path.join(BASE,'static','uploads'))
+    path=os.path.join(folder,filename)
+    if not os.path.isfile(path): raise HTTPException(404,'Photo unavailable')
+    return FileResponse(path,media_type='image/webp')
+
+@app.get('/admin/wow-nina')
+def nina_admin_page(): return FileResponse(os.path.join(BASE,'static','nina-admin.html'))
+
+
+# Platform-wide admin: digital products and centralized moderation access.
+def init_digital_catalog():
+    with conn() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS digital_products (id INTEGER PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', price REAL NOT NULL DEFAULT 0, buy_url TEXT NOT NULL, image_url TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)""")
+init_digital_catalog()
+
+class DigitalProduct(BaseModel):
+    title:str
+    description:str=''
+    price:float=Field(ge=0,le=100000000)
+    buy_url:str
+    image_url:str=''
+    active:bool=True
+
+def valid_url(value):
+    from urllib.parse import urlsplit
+    u=urlsplit(value.strip())
+    if u.scheme!='https' or not u.hostname or u.username or u.password or len(value)>1200: raise HTTPException(400,'Use a valid HTTPS link')
+    return value.strip()
+
+@app.get('/api/digital-shop/products')
+def digital_products(admin:bool=False,authorization:str|None=Header(None)):
+    if admin:admin_only(authorization)
+    with conn() as c:
+        rows=c.execute('SELECT * FROM digital_products '+('' if admin else 'WHERE active=1 ')+'ORDER BY created_at DESC,id DESC').fetchall()
+    return {'products':[dict(r) for r in rows]}
+
+@app.post('/api/admin/digital-shop/products')
+def digital_create(data:DigitalProduct,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('INSERT INTO digital_products(title,description,price,buy_url,image_url,active,created_at) VALUES(?,?,?,?,?,?,?)',(limited(data.title,120),data.description[:1500],data.price,valid_url(data.buy_url),valid_url(data.image_url) if data.image_url else '',int(data.active),int(time.time())))
+        return {'ok':True,'id':cur.lastrowid}
+
+@app.put('/api/admin/digital-shop/products/{pid}')
+def digital_update(pid:int,data:DigitalProduct,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE digital_products SET title=?,description=?,price=?,buy_url=?,image_url=?,active=? WHERE id=?',(limited(data.title,120),data.description[:1500],data.price,valid_url(data.buy_url),valid_url(data.image_url) if data.image_url else '',int(data.active),pid))
+        if not cur.rowcount:raise HTTPException(404,'Not found')
+    return {'ok':True}
+
+@app.delete('/api/admin/digital-shop/products/{pid}')
+def digital_hide(pid:int,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE digital_products SET active=0 WHERE id=?',(pid,))
+        if not cur.rowcount:raise HTTPException(404,'Not found')
+    return {'ok':True}
+
+@app.get('/admin')
+def platform_admin():return FileResponse(os.path.join(BASE,'static','platform-admin.html'))
+
+
+# Platform-wide administrator dashboard and recent activity.
+def init_platform_admin():
+    with conn() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS admin_notifications_seen(admin_id INTEGER PRIMARY KEY, last_seen INTEGER NOT NULL DEFAULT 0)")
+init_platform_admin()
+
+@app.get('/api/admin/platform/overview')
+def platform_overview(authorization:str|None=Header(None)):
+    admin=admin_only(authorization)
+    with conn() as c:
+        stats={}
+        for name,query in {
+            'members':'SELECT COUNT(*) FROM users',
+            'signups_today':"SELECT COUNT(*) FROM users WHERE created_at>=strftime('%s','now','start of day')",
+            'community_posts':'SELECT COUNT(*) FROM posts WHERE active=1',
+            'marketplace_listings':'SELECT COUNT(*) FROM listings WHERE active=1',
+            'services':'SELECT COUNT(*) FROM services WHERE active=1',
+            'jobs':'SELECT COUNT(*) FROM jobs WHERE active=1',
+            'pending_referrals':"SELECT COUNT(*) FROM referrals WHERE status='pending'",
+            'pending_withdrawals':"SELECT COUNT(*) FROM reward_claims WHERE status='pending'",
+            'digital_products':'SELECT COUNT(*) FROM digital_products WHERE active=1',
+            'wow_nina_products':'SELECT COUNT(*) FROM nina_products WHERE active=1',
+        }.items():
+            try:stats[name]=c.execute(query).fetchone()[0]
+            except sqlite3.OperationalError:stats[name]=0
+        events=[]
+        sources=[('signup','SELECT id,name AS detail,created_at FROM users'),('community','SELECT id,body AS detail,created_at FROM posts'),('marketplace','SELECT id,title AS detail,created_at FROM listings'),('service','SELECT id,title AS detail,created_at FROM services'),('referral','SELECT id,status AS detail,created_at FROM referrals'),('withdrawal','SELECT id,status AS detail,created_at FROM reward_claims'),('job','SELECT id,title AS detail,created_at FROM jobs')]
+        for kind,q in sources:
+            try:
+                for r in c.execute(q+' ORDER BY created_at DESC LIMIT 30').fetchall():events.append({'type':kind,'id':r['id'],'detail':str(r['detail'])[:140],'created_at':r['created_at']})
+            except sqlite3.OperationalError:pass
+        events=sorted(events,key=lambda e:e['created_at'],reverse=True)[:80]
+        seen=c.execute('SELECT last_seen FROM admin_notifications_seen WHERE admin_id=?',(admin['id'],)).fetchone()
+        last=seen['last_seen'] if seen else 0
+        unread=sum(e['created_at']>last for e in events)
+    return {'stats':stats,'events':events,'unread':unread,'last_seen':last,'news_mode':'public RSS feed, refresh on request; subject to publisher availability'}
+
+@app.post('/api/admin/platform/notifications/read')
+def platform_mark_read(authorization:str|None=Header(None)):
+    a=admin_only(authorization)
+    with conn() as c:c.execute('INSERT INTO admin_notifications_seen(admin_id,last_seen) VALUES(?,?) ON CONFLICT(admin_id) DO UPDATE SET last_seen=excluded.last_seen',(a['id'],int(time.time())))
+    return {'ok':True}
+
+@app.get('/api/news/daily')
+def daily_news():
+    # Read-only public news: no fabricated stories. Short excerpts and publisher links.
+    import urllib.request,xml.etree.ElementTree as ET,email.utils,datetime
+    feeds=[('BBC World','https://feeds.bbci.co.uk/news/world/rss.xml'),('BBC Technology','https://feeds.bbci.co.uk/news/technology/rss.xml'),('GMA News Philippines','https://www.gmanetwork.com/news/rss/news/nation/feed.xml'),('Philippine News Agency','https://www.pna.gov.ph/rss-feed')]
+    stories=[]
+    for source,url in feeds:
+        try:
+            req=urllib.request.Request(url,headers={'User-Agent':'WOWSuperApp/1.0 news feed reader'})
+            with urllib.request.urlopen(req,timeout=4) as response:
+                data=response.read(250000)
+            root=ET.fromstring(data)
+            for item in root.findall('./channel/item')[:7]:
+                title=(item.findtext('title') or '').strip();link=(item.findtext('link') or '').strip();published=(item.findtext('pubDate') or '').strip()
+                if title and link.startswith('https://'):
+                    stories.append({'title':title[:180],'url':link,'source':source,'region':'Philippines' if source in ('GMA News Philippines','Philippine News Agency') else 'World','published':published})
+        except Exception:continue
+    return {'stories':stories[:24],'updated_at':int(time.time()),'live':bool(stories),'message':'Headlines supplied by their publishers. Feed may be unavailable; no stories are invented.'}
+
+
+# Original daily motivation: admin-managed, deterministic Philippine calendar day.
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+DEFAULT_MOTIVATION = [
+ "Small progress is still progress. Keep moving, even when nobody is watching.",
+ "Your beginning does not decide your ending. Your choices today matter.",
+ "You can be kind and still have boundaries. Both are strengths.",
+ "Not every quiet season is an empty one. Some seasons are for growing.",
+ "A difficult day does not erase the courage it took to show up.",
+ "Make room for learning. You do not have to know everything to begin.",
+ "Rest when you need to, then return to what matters to you.",
+ "The dream becomes more real each time you take one practical step.",
+ "Your pace is yours. Consistency matters more than comparison.",
+ "A new day is another opportunity to choose what deserves your energy.",
+ "Let your work speak, but do not forget to enjoy the journey.",
+ "You can start again without calling your earlier efforts a failure.",
+ "Build something meaningful, one honest decision at a time.",
+ "Even the smallest act of courage can change the direction of a day.",
+ "Focus on what you can improve, not on what you cannot control."
+]
+
+def init_motivation():
+    with conn() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS motivation_quotes(id INTEGER PRIMARY KEY, quote TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)')
+        if c.execute('SELECT COUNT(*) FROM motivation_quotes').fetchone()[0] == 0:
+            c.executemany('INSERT INTO motivation_quotes(quote,created_at) VALUES (?,?)',[(q,int(time.time())) for q in DEFAULT_MOTIVATION])
+init_motivation()
+
+@app.get('/api/motivation/daily')
+def motivation_daily():
+    day=datetime.now(ZoneInfo('Asia/Manila')).date()
+    with conn() as c:
+        quotes=c.execute('SELECT id,quote FROM motivation_quotes WHERE active=1 ORDER BY id').fetchall()
+    if not quotes:return {'quote':None,'author':'Muzayyanah','date':day.isoformat()}
+    chosen=quotes[day.toordinal()%len(quotes)]
+    return {'id':chosen['id'],'quote':chosen['quote'],'author':'Muzayyanah','date':day.isoformat(),'timezone':'Asia/Manila'}
+
+class MotivationInput(BaseModel):
+    quote:str=Field(min_length=5,max_length=500)
+
+@app.get('/api/admin/motivation')
+def motivation_list(authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:rows=c.execute('SELECT id,quote,active,created_at FROM motivation_quotes ORDER BY id DESC').fetchall()
+    return {'quotes':[dict(r) for r in rows]}
+
+@app.post('/api/admin/motivation')
+def motivation_add(body:MotivationInput,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('INSERT INTO motivation_quotes(quote,created_at) VALUES (?,?)',(body.quote.strip(),int(time.time())))
+        return {'ok':True,'id':cur.lastrowid}
+
+@app.put('/api/admin/motivation/{quote_id}')
+def motivation_edit(quote_id:int,body:MotivationInput,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE motivation_quotes SET quote=? WHERE id=?',(body.quote.strip(),quote_id))
+        if not cur.rowcount:raise HTTPException(404,'Quote not found')
+    return {'ok':True}
+
+@app.delete('/api/admin/motivation/{quote_id}')
+def motivation_hide(quote_id:int,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE motivation_quotes SET active=0 WHERE id=?',(quote_id,))
+        if not cur.rowcount:raise HTTPException(404,'Quote not found')
+    return {'ok':True}
+
+@app.get('/admin/motivation')
+def motivation_admin_page(authorization:str|None=Header(None)):
+    return FileResponse(os.path.join(BASE,'static','motivation-admin.html'))

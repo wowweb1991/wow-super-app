@@ -71,3 +71,18 @@ Added:
 Any signed-in user can publish jobs at /jobs. Public listings are unverified; applicants can submit messages/contact details, owners can view applications and close posts, and users can report suspicious listings. API: GET/POST /api/jobs, GET /api/jobs/mine, DELETE /api/jobs/{id}, POST /api/jobs/{id}/apply, GET /api/jobs/{id}/applications, POST /api/jobs/{id}/report, GET /api/admin/jobs/reports.
 
 **Deployment caution:** SQLite data on Render ephemeral storage can be lost on redeploy. Configure persistent database storage before accepting real accounts, jobs or applications. The Jobs page expects the same bearer token used by the main app, under localStorage key `wow_token` or `token`; if the frontend uses a different key, align it before launch. Test authorization and job flows in staging.
+
+
+## Daily Quran + Messenger rewards
+- Daily Qur’an: `/api/quran/daily` and homepage; rotates five curated excerpts at Philippine date boundary. Full Arabic verse available through Quran.com link, not stored locally.
+- Rewards: registered users see verified balance and can request manual payout via Messenger; send GCash QR + claim ID + registered email to WOW WEB STUDIO official Facebook page.
+- Admin review interface: `/static/rewards-admin.html`; paste an ADMIN session token. Admin must verify welcome eligibility, genuine referral accounts, and GCash details before approving. Messenger messages are NOT automatically integrated or verified.
+- Existing in-app QR option remains.
+- CRITICAL: SQLite database on Render may be ephemeral. Configure persistent storage and admin provisioning before cash rewards go live; no real payouts should be promised until fraud controls and budget are in place.
+
+
+## Platform Admin Control Center
+Visit `/admin` while logged in as an admin. Digital Shop products can be created, edited, and hidden; WOW NINA and Rewards link to their existing admin pages. Marketplace and Jobs are linked, not yet consolidated into a full moderation dashboard. Existing static Gumroad products remain hardcoded. Use DATABASE_PATH on persistent storage and UPLOAD_DIR on persistent storage for Render; otherwise data/uploads may disappear on redeploy. Do not enable real money rewards before security and payout review.
+
+
+SUPER ADMIN: /admin shows member counts, signup activity, notifications, products, jobs, referrals. Notifications are in-app (not push/email). /api/news/daily reads BBC RSS at request time, requires outbound internet, and does not guarantee daily new articles. Keep a persistent database and media storage on Render before public launch.
