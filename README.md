@@ -1,19 +1,49 @@
-# WOW SUPER APP — Flask / Supabase / Render
+# WOW Super App — Working MVP
 
-This is a functional MVP, **not a fully launched commercial platform**. Includes signup/login, product listings, community posts/comments/likes, service listings/inquiries, basic admin access, and an AI prompt helper. **No checkout, payment collection, actual AI API calls, file uploads, booking calendar, or full moderation system yet.**
+A responsive multi-user web app with real account registration/login, marketplace listings, community posts, services, service inquiries, content ownership and admin moderation support.
 
-## Deploy
-1. Back up your existing GitHub `main.py` and `requirements.txt`. Upload these files to the repository root, keeping the filenames exact. Add `schema.sql` and this README.
-2. In Supabase, open **SQL Editor**, paste `schema.sql`, and run it once. Enable Email auth under Authentication > Providers. If Confirm email is enabled, new users must verify first.
-3. In Render, open your **Web Service** > **Environment**. Add `SUPABASE_URL` (Supabase Project URL), `SUPABASE_PUBLISHABLE_KEY` (publishable/anon key, not secret/service-role), and `FLASK_SECRET_KEY` (long randomly generated secret). Optionally `ADMIN_USER_IDS` (comma-separated Supabase auth user UUIDs).
-4. **Never** put `sb_secret_*`, service-role keys, or passwords in GitHub or screenshots. Rotate any secrets already shared.
-5. In Render Settings, set **Build Command** `pip install -r requirements.txt` and **Start Command** `gunicorn main:app --bind 0.0.0.0:$PORT`.
-6. Deploy latest commit. Open `/signup`, `/login`, `/marketplace`, `/community`, `/services`, `/ai`, `/admin`.
-7. Existing user accounts stay in the same Supabase Auth project, provided you keep its URL and key. Database tables are new; this package does not migrate any old app data.
+## Start locally
 
-## Notes
-- Supabase RLS limits writes to the signed-in user and allows signed-in users to read public listings.
-- Admin dashboard is only accessible to IDs in `ADMIN_USER_IDS`, but counts are subject to user RLS and 1,000-row limits. Use Supabase dashboard for real moderation.
-- Product image field accepts a publicly hosted image URL, not uploads.
-- Inquiry messages are stored in Supabase; there is not yet a seller inbox UI or notification delivery.
-- For production add CSRF protection, rate limiting, abuse reporting/moderation, privacy policy, security testing, backups, and payment-provider integration before accepting money.
+Requires Python 3.10+.
+
+```bash
+cd wow-super-app
+python -m pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Open http://localhost:8000 . API documentation: http://localhost:8000/api/docs
+
+## Test the multi-user features
+
+1. Create account A. Publish a product, a community post, and a service.
+2. Log out and create account B. See account A's content and request account A's service.
+3. Log back in as account A. Open **My Requests** to see account B's request.
+
+## Architecture
+
+Browser (responsive HTML/CSS/JS) → FastAPI REST API → SQLite (persistent `wow.db`). Authentication uses PBKDF2 password hashing, cryptographically random bearer tokens and database-backed sessions. Each post/listing/service is tied to a user. Server-side ownership checks protect deletions. Inputs are validated and output is HTML-escaped.
+
+## IMPORTANT: Before public launch
+
+This is a functional MVP, **not a production-ready platform for thousands of users**. It has no payment processing, private chat, image uploads, email verification, password recovery, rate limiting, spam protection, reporting workflow, privacy policy, or backups. The service-request message is visible to the requester and service provider. User data is stored on the server running the app, not synchronized between separate installations.
+
+Recommended production upgrades:
+
+- Replace SQLite with managed PostgreSQL and migrations; use connection pooling.
+- Add email verification, password reset, token revocation/expiry housekeeping, abuse prevention, rate limiting, CAPTCHA and logging.
+- Use HTTPS, domain, secure deployment, backups, monitoring, and privacy/terms pages compliant with applicable law.
+- Add object storage for images, search indexes, pagination/caching, payment provider integration and moderation queues.
+- Run multiple stateless API instances behind a load balancer with a shared database and session store.
+- Set up an initial administrator using a trusted one-time database migration (never make all newly registered users admins).
+
+No purchases or money transfers occur in this MVP. Prices are display-only. There is no real checkout. No live hosting/domain is included.
+
+## AI Studio MVP extension
+AI Studio includes per-user demo credit wallets (10 starter credits), server-side deductions,
+generation history, a free caption template and a 2-credit description template.
+Poster, logo, video, and website AI generators are visibly marked coming soon.
+The preview pricing is **not** a payment checkout; no real payments or external AI models are connected.
+Before accepting payments: integrate a payment processor using verified signed webhooks,
+idempotent fulfillment, refund handling, admin reconciliation, and secure production auth.
+For scale: migrate SQLite to PostgreSQL, add queues/rate limits, object storage and monitoring.
