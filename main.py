@@ -10,12 +10,10 @@ DB=os.getenv('DATABASE_PATH',os.path.join(BASE,'wow.db'))
 app=FastAPI(title='WOW Super App API',docs_url='/api/docs')
 app.mount('/static', StaticFiles(directory=os.path.join(BASE, 'static')), name='static')
 
+from wow_database import connect
+
 def conn():
-    c=sqlite3.connect(DB,timeout=20)
-    c.row_factory=sqlite3.Row
-    c.execute('PRAGMA foreign_keys=ON')
-    c.execute('PRAGMA journal_mode=WAL')
-    return c
+    return connect(DB)
 
 def init():
     with conn() as c:
@@ -97,7 +95,9 @@ class Moderation(BaseModel):
 @app.get('/')
 def home():return FileResponse(os.path.join(BASE,'static','index.html'))
 @app.get('/api/health')
-def health():return {'status':'ok'}
+def health():
+    with conn() as c:c.execute('SELECT 1').fetchone()
+    return {'status':'ok','database':'postgresql' if os.getenv('DATABASE_URL','').strip() else 'sqlite'}
 @app.post('/api/register')
 def register(data:Auth):
     email=data.email.strip().lower()
