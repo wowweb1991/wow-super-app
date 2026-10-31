@@ -86,3 +86,7 @@ Visit `/admin` while logged in as an admin. Digital Shop products can be created
 
 
 SUPER ADMIN: /admin shows member counts, signup activity, notifications, products, jobs, referrals. Notifications are in-app (not push/email). /api/news/daily reads BBC RSS at request time, requires outbound internet, and does not guarantee daily new articles. Keep a persistent database and media storage on Render before public launch.
+
+
+## AI Services integration
+See [AI_SERVICES_SETUP.md](AI_SERVICES_SETUP.md) for the updated AI text services, admin Marketing Studio, activation and verification limits. The earlier AI Studio demo description above describes the previous version.

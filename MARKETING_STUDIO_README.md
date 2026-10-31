@@ -1,0 +1,1 @@
+See AI_SERVICES_SETUP.md for the current integration and deployment steps. Marketing templates and locally rendered promotional assets work without an AI key; optional AI captions require a server-side OPENAI_API_KEY.

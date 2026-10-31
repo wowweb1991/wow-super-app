@@ -176,37 +176,57 @@ def remove(kind:str,item_id:int,authorization:str|None=Header(None)):
         c.execute(f'UPDATE {kind} SET active=0 WHERE id=?',(item_id,))
     return {'ok':True}
 
-# AI Studio: honest template-based demonstration, not an external AI model.
-# Credits cannot be purchased or minted by the client. Payment fulfillment requires verified server-side webhooks.
-AI_TOOLS={'caption':0,'description':2,'poster':5,'logo':10,'video':30,'website':50}
+# AI text services. Provider credentials stay on the server.
+import json, urllib.request, urllib.error
+AI_TOOLS={'caption':0,'description':2,'business':2,'video_script':2,'poster':5,'logo':10,'video':30,'website':50}
+TEXT_TOOLS={'caption','description','business','video_script'}
 class AIInput(BaseModel):
     tool:str
     prompt:str=Field(min_length=3,max_length=800)
+    language:str='English'
+
+def provider_text(prompt,language,tool):
+    key=os.getenv('OPENAI_API_KEY','')
+    if not key:raise HTTPException(503,'AI provider is not connected. No credits charged.')
+    body=json.dumps({'model':os.getenv('OPENAI_TEXT_MODEL','gpt-4.1-mini'),'store':False,'max_output_tokens':1000,
+        'instructions':f'Write {tool} content in {language}. Use only supplied business facts. Do not invent prices, links, guarantees or testimonials. For video_script provide scenes, voiceover and on-screen text. Return a draft for human review.',
+        'input':prompt}).encode()
+    req=urllib.request.Request('https://api.openai.com/v1/responses',data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+    try:
+        with urllib.request.urlopen(req,timeout=45) as response:data=json.load(response)
+    except (urllib.error.URLError,TimeoutError,ValueError):raise HTTPException(502,'AI provider unavailable. No credits charged.')
+    text='\n'.join(part.get('text','') for item in data.get('output',[]) for part in item.get('content',[]) if part.get('type')=='output_text').strip()
+    if not text:raise HTTPException(502,'AI provider returned no text. No credits charged.')
+    return text
+
 @app.get('/api/ai/tools')
-def ai_tools():return {'tools':[{'id':k,'credits':v,'mode':'template-demo' if k in ('caption','description') else 'coming-soon'} for k,v in AI_TOOLS.items()],'payments_live':False}
+def ai_tools():
+    connected=bool(os.getenv('OPENAI_API_KEY'))
+    return {'tools':[{'id':k,'credits':v,'mode':('ai' if connected else 'provider-required') if k in TEXT_TOOLS else 'coming-soon'} for k,v in AI_TOOLS.items()],'payments_live':False,'provider_connected':connected}
+@app.get('/ai-services')
+def ai_page():return FileResponse(os.path.join(BASE,'static','ai-services.html'))
 @app.get('/api/ai/wallet')
 def ai_wallet(authorization:str|None=Header(None)):
     u=user(authorization)
-    with conn() as c:
-        r=c.execute('SELECT credits FROM ai_wallets WHERE user_id=?',(u['id'],)).fetchone()
+    with conn() as c:r=c.execute('SELECT credits FROM ai_wallets WHERE user_id=?',(u['id'],)).fetchone()
     return {'credits':r['credits'] if r else 0,'currency':'demo credits','payments_live':False}
 @app.post('/api/ai/generate')
 def ai_generate(data:AIInput,authorization:str|None=Header(None)):
     u=user(authorization)
-    if data.tool not in AI_TOOLS:raise HTTPException(400,'Unknown tool')
-    if data.tool not in ('caption','description'):raise HTTPException(501,'This generator requires an AI provider integration and is not live yet. No credits charged.')
-    prompt=limited(data.prompt,800)
-    cost=AI_TOOLS[data.tool]
-    if data.tool=='caption': result=f'✨ Discover {prompt}!\n\nMade for people who value quality and creativity. Message us to learn more!\n\n#WOWSuperApp #DiscoverMore #SupportLocal'
-    else:result=f'{prompt}\n\nExplore the details, connect with the creator, and send an inquiry to learn more.'
+    if data.tool not in TEXT_TOOLS:raise HTTPException(400,'This tool is not available for generation')
+    if data.language not in ('English','Tagalog','Bisaya'):raise HTTPException(400,'Unsupported language')
+    prompt=limited(data.prompt,800);cost=AI_TOOLS[data.tool]
     with conn() as c:
         c.execute('BEGIN IMMEDIATE')
-        if cost:
-            cur=c.execute('UPDATE ai_wallets SET credits=credits-? WHERE user_id=? AND credits>=?',(cost,u['id'],cost))
-            if cur.rowcount!=1:raise HTTPException(402,'Insufficient demo credits')
-            c.execute('INSERT INTO credit_events(user_id,delta,reason,created_at) VALUES (?,?,?,?)',(u['id'],-cost,'demo generation: '+data.tool,int(time.time())))
+        recent=c.execute('SELECT COUNT(*) FROM ai_generations WHERE user_id=? AND created_at>?',(u['id'],int(time.time())-3600)).fetchone()[0]
+        if recent>=20:raise HTTPException(429,'Hourly limit reached. Try again later.')
+        cur=c.execute('UPDATE ai_wallets SET credits=credits-? WHERE user_id=? AND credits>=?',(cost,u['id'],cost))
+        if cur.rowcount!=1:raise HTTPException(402,'Insufficient demo credits')
+        # A failed provider call rolls back the reservation and does not create history.
+        result=provider_text(prompt,data.language,data.tool)
+        c.execute('INSERT INTO credit_events(user_id,delta,reason,created_at) VALUES (?,?,?,?)',(u['id'],-cost,'AI generation: '+data.tool,int(time.time())))
         c.execute('INSERT INTO ai_generations(user_id,tool,prompt,result,cost,created_at) VALUES (?,?,?,?,?,?)',(u['id'],data.tool,prompt,result,cost,int(time.time())))
-    return {'result':result,'credits_charged':cost,'mode':'template-demo'}
+    return {'result':result,'credits_charged':cost,'mode':'ai'}
 @app.get('/api/ai/history')
 def ai_history(authorization:str|None=Header(None)):
     u=user(authorization)
@@ -693,3 +713,145 @@ def motivation_hide(quote_id:int,authorization:str|None=Header(None)):
 @app.get('/admin/motivation')
 def motivation_admin_page(authorization:str|None=Header(None)):
     return FileResponse(os.path.join(BASE,'static','motivation-admin.html'))
+
+# WOW Marketing Studio: admin-only draft, visual and short video creator.
+# Assets are served via authenticated endpoints; nothing is auto-published.
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+import subprocess, tempfile, pathlib
+
+MARKETING_DIR=os.getenv('MARKETING_ASSET_DIR',os.path.join(BASE,'marketing_assets'))
+os.makedirs(MARKETING_DIR,exist_ok=True)
+
+def init_marketing():
+    with conn() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS marketing_drafts(id INTEGER PRIMARY KEY,owner_id INTEGER NOT NULL,brand TEXT NOT NULL,topic TEXT NOT NULL,channel TEXT NOT NULL,caption TEXT NOT NULL,headline TEXT NOT NULL,cta TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)""")
+init_marketing()
+
+class MarketingCreate(BaseModel):
+    brand:str=Field(min_length=2,max_length=60)
+    topic:str=Field(min_length=3,max_length=220)
+    channel:str=Field(default='Facebook',max_length=40)
+    cta:str=Field(default='Explore now',max_length=80)
+    use_ai:bool=False
+    language:str='English'
+
+class MarketingStatus(BaseModel):
+    status:str
+
+def marketing_get(draft_id,authorization):
+    admin_only(authorization)
+    with conn() as c:r=c.execute('SELECT * FROM marketing_drafts WHERE id=?',(draft_id,)).fetchone()
+    if not r:raise HTTPException(404,'Draft not found')
+    return dict(r)
+
+@app.get('/admin/marketing')
+def marketing_page():
+    return FileResponse(os.path.join(BASE,'static','marketing-admin.html'))
+
+@app.post('/api/admin/marketing/drafts')
+def marketing_create(body:MarketingCreate,authorization:str|None=Header(None)):
+    admin=admin_only(authorization)
+    brand=limited(body.brand,60); topic=limited(body.topic,220); cta=limited(body.cta,80)
+    channel=body.channel if body.channel in ('Facebook','Instagram','TikTok','YouTube Shorts') else 'Facebook'
+    headline=topic[:90]
+    caption=f"🚀 {brand.upper()}\n\n{topic}\n\n✨ Discover what is possible with {brand}.\n📲 {cta}: https://wow-super-app.onrender.com\n\n#WOWSuperApp #ExploreMore #Philippines"
+    if body.use_ai:
+        if body.language not in ('English','Tagalog','Bisaya'):raise HTTPException(400,'Unsupported language')
+        caption=provider_text(f'Brand: {brand}\nPromotion: {topic}\nPlatform: {channel}\nCall to action: {cta}',body.language,'marketing caption')
+    now=int(time.time())
+    with conn() as c:
+        recent=c.execute('SELECT COUNT(*) FROM marketing_drafts WHERE owner_id=? AND created_at>?',(admin['id'],now-3600)).fetchone()[0]
+        if recent>=20:raise HTTPException(429,'Hourly draft limit reached')
+        cur=c.execute('INSERT INTO marketing_drafts(owner_id,brand,topic,channel,caption,headline,cta,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',(admin['id'],brand,topic,channel,caption,headline,cta,now,now))
+        return {'id':cur.lastrowid,'caption':caption,'status':'pending','note':('AI-generated' if body.use_ai else 'Template-generated')+' draft. Review before publishing.'}
+
+@app.get('/api/admin/marketing/drafts')
+def marketing_list(authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:rows=c.execute('SELECT * FROM marketing_drafts ORDER BY created_at DESC,id DESC LIMIT 100').fetchall()
+    return {'drafts':[dict(r) for r in rows]}
+
+@app.put('/api/admin/marketing/drafts/{draft_id}/status')
+def marketing_status(draft_id:int,body:MarketingStatus,authorization:str|None=Header(None)):
+    marketing_get(draft_id,authorization)
+    if body.status not in ('pending','approved','rejected'):raise HTTPException(400,'Invalid status')
+    with conn() as c:c.execute('UPDATE marketing_drafts SET status=?,updated_at=? WHERE id=?',(body.status,int(time.time()),draft_id))
+    return {'ok':True,'status':body.status,'published':False}
+
+def marketing_font(size,bold=False):
+    loc='/usr/share/fonts/truetype/dejavu/DejaVuSans'+('-Bold' if bold else '')+'.ttf'
+    try:return ImageFont.truetype(loc,size)
+    except:return ImageFont.load_default()
+
+def marketing_image(d,frame=0):
+    im=Image.new('RGB',(720,1280),(6,17,35));dr=ImageDraw.Draw(im)
+    dr.rounded_rectangle((32,34,688,1246),radius=42,outline=(34,149,248),width=5)
+    dr.rounded_rectangle((58,78,662,180),radius=25,fill=(12,42,83))
+    dr.text((85,108),'WOW SUPER APP',font=marketing_font(43,True),fill=(93,196,255))
+    title=['DISCOVER','EXPLORE','JOIN TODAY','ONE APP. MORE.'][frame%4] if frame else d['brand'].upper()
+    dr.text((66,280),title[:22],font=marketing_font(54,True),fill='white')
+    from textwrap import wrap
+    y=410
+    for line in wrap(d['topic'],width=24)[:7]:
+        dr.text((70,y),line,font=marketing_font(34,True),fill=(214,235,255));y+=58
+    dr.rounded_rectangle((68,925,650,1035),radius=30,fill=(22,135,244))
+    dr.text((93,958),d['cta'][:25],font=marketing_font(36,True),fill='white')
+    dr.text((70,1130),'wow-super-app.onrender.com',font=marketing_font(24),fill=(132,187,234))
+    return im
+
+@app.get('/api/admin/marketing/drafts/{draft_id}/visual.png')
+def marketing_visual(draft_id:int,authorization:str|None=Header(None)):
+    d=marketing_get(draft_id,authorization)
+    b=BytesIO();marketing_image(d).save(b,format='PNG');b.seek(0)
+    return StreamingResponse(b,media_type='image/png',headers={'Content-Disposition':f'attachment; filename="wow-ad-{draft_id}.png"'})
+
+@app.get('/api/admin/marketing/drafts/{draft_id}/video.mp4')
+def marketing_video(draft_id:int,authorization:str|None=Header(None)):
+    d=marketing_get(draft_id,authorization)
+    # 12s silent vertical motion-card draft, not a recording of actual UI.
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(4):marketing_image(d,i+1).save(os.path.join(tmp,f'{i}.png'))
+        playlist=os.path.join(tmp,'frames.txt')
+        with open(playlist,'w') as f:
+            for i in range(4):f.write(f"file '{i}.png'\nduration 3\n")
+            f.write("file '3.png'\n")
+        output=os.path.join(tmp,'ad.mp4')
+        try:
+            subprocess.run(['ffmpeg','-y','-loglevel','error','-f','concat','-safe','0','-i',playlist,'-vf','fps=24,format=yuv420p','-c:v','libx264','-preset','veryfast','-movflags','+faststart',output],check=True,timeout=35,cwd=tmp)
+        except (OSError,subprocess.CalledProcessError,subprocess.TimeoutExpired):raise HTTPException(503,'Video renderer unavailable on this server')
+        data=pathlib.Path(output).read_bytes()
+    return StreamingResponse(BytesIO(data),media_type='video/mp4',headers={'Content-Disposition':f'attachment; filename="wow-ad-{draft_id}.mp4"'})
+
+# One admin entry point for platform overview, AI and hiring moderation.
+@app.get('/super-admin')
+@app.get('/admin/super')
+def unified_admin_alias():
+    return FileResponse(os.path.join(BASE,'static','platform-admin.html'))
+
+@app.get('/admin/rewards')
+def rewards_admin_page():
+    return FileResponse(os.path.join(BASE,'static','rewards-admin.html'))
+
+@app.get('/api/admin/jobs')
+def admin_jobs(page:int=1,q:str='',authorization:str|None=Header(None)):
+    admin_only(authorization)
+    page=max(1,min(page,1000));term='%'+q.strip()[:80]+'%'
+    with conn() as c:
+        total=c.execute('SELECT COUNT(*) FROM jobs WHERE title LIKE ? OR location LIKE ?',(term,term)).fetchone()[0]
+        rows=c.execute('''SELECT j.*,u.name AS posted_by,
+            (SELECT COUNT(*) FROM job_applications a WHERE a.job_id=j.id) AS applications,
+            (SELECT COUNT(*) FROM job_reports r WHERE r.job_id=j.id) AS reports
+            FROM jobs j JOIN users u ON u.id=j.user_id
+            WHERE j.title LIKE ? OR j.location LIKE ?
+            ORDER BY j.created_at DESC,j.id DESC LIMIT 30 OFFSET ?''',(term,term,(page-1)*30)).fetchall()
+    return {'jobs':[dict(r) for r in rows],'page':page,'total':total}
+
+@app.post('/api/admin/jobs/{job_id}/close')
+def admin_close_job(job_id:int,authorization:str|None=Header(None)):
+    admin_only(authorization)
+    with conn() as c:
+        cur=c.execute('UPDATE jobs SET active=0 WHERE id=?',(job_id,))
+        if not cur.rowcount:raise HTTPException(404,'Job not found')
+    return {'ok':True,'active':False}
