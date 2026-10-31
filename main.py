@@ -54,13 +54,18 @@ def issue(c,uid):
     c.execute('INSERT INTO sessions VALUES (?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),uid,int(time.time())+7*86400))
     return token
 
+ADMIN_EMAILS=frozenset({'luamaryjoy26@gmail.com','habibtih05@icloud.com'})
+
 def user(authorization:str|None):
     if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Please sign in')
     token=authorization[7:]
     with conn() as c:
         r=c.execute('SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>?',(hashlib.sha256(token.encode()).hexdigest(),int(time.time()))).fetchone()
     if not r: raise HTTPException(401,'Session expired. Sign in again')
-    return dict(r)
+    account=dict(r)
+    if account['role']=='admin' and account['email'].strip().lower() not in ADMIN_EMAILS:
+        account['role']='user'
+    return account
 
 def limited(s,maxlen):
     s=s.strip()
@@ -855,3 +860,20 @@ def admin_close_job(job_id:int,authorization:str|None=Header(None)):
         cur=c.execute('UPDATE jobs SET active=0 WHERE id=?',(job_id,))
         if not cur.rowcount:raise HTTPException(404,'Job not found')
     return {'ok':True,'active':False}
+
+
+@app.get('/admin/login')
+def admin_login_page():
+    return FileResponse(os.path.join(BASE,'static','admin-login.html'))
+
+@app.post('/api/admin/login')
+def exclusive_admin_login(data:Auth):
+    email=data.email.strip().lower()
+    with conn() as c:
+        r=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+        if not r or not hmac.compare_digest(hashed(data.password,r['salt']),r['password_hash']):
+            raise HTTPException(401,'Invalid administrator credentials')
+        if email not in ADMIN_EMAILS or r['role']!='admin':
+            raise HTTPException(403,'Administrator access is not enabled for this account')
+        token=issue(c,r['id'])
+    return {'token':token}
