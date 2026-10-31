@@ -877,3 +877,50 @@ def exclusive_admin_login(data:Auth):
             raise HTTPException(403,'Administrator access is not enabled for this account')
         token=issue(c,r['id'])
     return {'token':token}
+
+# Owner recovery: enabled only by a temporary, server-configured secret.
+# No public email-only reset and no password stored in source or logs.
+def init_admin_recovery():
+    with conn() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS admin_recovery_tokens(digest TEXT PRIMARY KEY,email TEXT NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0)')
+        token=os.getenv('ADMIN_RECOVERY_TOKEN','')
+        email=os.getenv('ADMIN_RECOVERY_EMAIL','').strip().lower()
+        if len(token)>=32 and email in ADMIN_EMAILS:
+            c.execute('INSERT OR IGNORE INTO admin_recovery_tokens(digest,email,expires) VALUES (?,?,?)',
+                      (hashlib.sha256(token.encode()).hexdigest(),email,int(time.time())+1800))
+init_admin_recovery()
+
+class AdminRecoveryInput(BaseModel):
+    email:str=Field(max_length=254)
+    recovery_code:str=Field(min_length=32,max_length=256)
+    new_password:str=Field(min_length=12,max_length=256)
+    confirm_password:str=Field(min_length=12,max_length=256)
+
+@app.post('/api/admin/recover')
+def recover_admin(data:AdminRecoveryInput):
+    configured=os.getenv('ADMIN_RECOVERY_TOKEN','')
+    email=os.getenv('ADMIN_RECOVERY_EMAIL','').strip().lower()
+    if len(configured)<32 or email not in ADMIN_EMAILS:
+        raise HTTPException(503,'Recovery is disabled. Configure it in your Render Environment first.')
+    if data.email.strip().lower()!=email or not hmac.compare_digest(data.recovery_code.encode(),configured.encode()):
+        raise HTTPException(403,'Invalid recovery details')
+    if data.new_password!=data.confirm_password:raise HTTPException(400,'Passwords do not match')
+    if data.new_password==configured:raise HTTPException(400,'Use a password different from the recovery code')
+    digest=hashlib.sha256(configured.encode()).hexdigest()
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        permit=c.execute('SELECT * FROM admin_recovery_tokens WHERE digest=?',(digest,)).fetchone()
+        if not permit or permit['email']!=email or permit['used'] or permit['expires']<=int(time.time()):
+            raise HTTPException(403,'Recovery code expired or already used. Set a NEW code in Render and redeploy.')
+        account=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
+        if not account:
+            raise HTTPException(404,'Account not found in the current database. Recovery did not create or change an account. Register this email on the homepage, then retry recovery.')
+        salt=secrets.token_hex(16)
+        c.execute("UPDATE users SET salt=?,password_hash=?,role='admin' WHERE id=?",(salt,hashed(data.new_password,salt),account['id']))
+        c.execute('DELETE FROM sessions WHERE user_id=?',(account['id'],))
+        c.execute('UPDATE admin_recovery_tokens SET used=1 WHERE digest=?',(digest,))
+    return {'ok':True,'message':'Password updated and administrator access enabled. All previous sessions were signed out. Remove ADMIN_RECOVERY_TOKEN and ADMIN_RECOVERY_EMAIL from Render, then sign in.'}
+
+@app.get('/admin/recover')
+def admin_recovery_page():
+    return HTMLResponse('''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WOW Admin Recovery</title><style>body{background:#071222;color:#eef6ff;font:16px system-ui;margin:0}main{max-width:470px;margin:5vh auto;padding:24px}form{background:#102640;padding:22px;border:1px solid #31577e;border-radius:18px}label{display:block;margin:16px 0}input,button{box-sizing:border-box;width:100%;font:inherit;padding:12px;border-radius:9px;margin-top:7px}input{background:#071222;color:white;border:1px solid #54789c}button{background:#258ceb;color:white;border:0}a{color:#87c9ff}#message{white-space:pre-wrap}</style><main><a href="/admin/login">← Admin Sign In</a><h1>Recover Admin Access</h1><p>For the owner of this Render service. Set a temporary recovery code in Render first. It expires after 30 minutes and can be used once per configured code in this database.</p><form id="recovery"><label>Email<input id="email" type="email" autocomplete="username" required></label><label>Temporary recovery code<input id="code" type="password" minlength="32" maxlength="256" autocomplete="off" required></label><label>New password<input id="password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>Confirm new password<input id="confirm" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button id="submit">Reset password &amp; enable admin</button><p id="message" role="status"></p></form><p>Keep the code and password private. Remove the recovery settings from Render after success.</p></main><script>const $=id=>document.getElementById(id);$('recovery').onsubmit=async e=>{e.preventDefault();if($('password').value!==$('confirm').value){$('message').textContent='Passwords do not match';return}$('submit').disabled=true;$('message').textContent='Updating…';try{const r=await fetch('/api/admin/recover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('email').value,recovery_code:$('code').value,new_password:$('password').value,confirm_password:$('confirm').value})});const d=await r.json();if(!r.ok)throw Error(d.detail||'Recovery failed');localStorage.removeItem('wow_token');$('recovery').reset();$('message').textContent=d.message}catch(e){$('message').textContent=e.message;$('submit').disabled=false}};</script></html>''',headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
