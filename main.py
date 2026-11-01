@@ -1,7 +1,7 @@
 import os, sqlite3, secrets, hashlib, hmac, time, base64, re
 from contextlib import contextmanager
 from fastapi import FastAPI, Request, HTTPException, Header, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -928,3 +928,28 @@ def admin_recovery_page():
 # Additive video jobs only: existing accounts and database settings are untouched.
 from runway_video import install_video
 install_video(app, conn, admin_only, BASE)
+
+
+
+# Public discovery only; never includes account or admin data.
+@app.middleware("http")
+async def discovery_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path.lower()
+    if path.startswith(("/api/", "/admin", "/super-admin")) or (path.startswith("/static/") and "admin" in path):
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+@app.get('/about', include_in_schema=False)
+def public_about():
+    return FileResponse(os.path.join(BASE, 'static', 'about.html'))
+
+@app.get('/robots.txt', include_in_schema=False)
+def discovery_robots():
+    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://wow-super-app.onrender.com/sitemap.xml\n", media_type='text/plain')
+
+@app.get('/sitemap.xml', include_in_schema=False)
+def discovery_sitemap():
+    paths = ['/', '/about']
+    urls = ''.join('<url><loc>https://wow-super-app.onrender.com' + path + '</loc></url>' for path in paths)
+    return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + urls + '</urlset>', media_type='application/xml')
