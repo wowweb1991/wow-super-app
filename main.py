@@ -953,3 +953,10 @@ def discovery_sitemap():
     paths = ['/', '/about']
     urls = ''.join('<url><loc>https://wow-super-app.onrender.com' + path + '</loc></url>' for path in paths)
     return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + urls + '</urlset>', media_type='application/xml')
+
+
+
+# Browser-only arcade. No user, wallet, or database mutations.
+@app.get('/arcade', include_in_schema=False)
+def arcade_page():
+    return FileResponse(os.path.join(BASE, 'static', 'arcade.html'))
