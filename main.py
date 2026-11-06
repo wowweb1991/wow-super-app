@@ -61,6 +61,10 @@ def user(authorization:str|None):
         r=c.execute('SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>?',(hashlib.sha256(token.encode()).hexdigest(),int(time.time()))).fetchone()
     if not r: raise HTTPException(401,'Session expired. Sign in again')
     account=dict(r)
+    with conn() as c:phone=c.execute('SELECT phone,verified FROM user_phones WHERE user_id=?',(account['id'],)).fetchone()
+    if phone:
+        account['mobile']=phone['phone'];account['mobile_verified']=bool(phone['verified'])
+    if account['email'].endswith('@accounts.invalid'):account['email']=''
     if account['role']=='admin' and account['email'].strip().lower() not in ADMIN_EMAILS:
         account['role']='user'
     return account
@@ -70,9 +74,13 @@ def limited(s,maxlen):
     if not s or len(s)>maxlen: raise HTTPException(400,f'Text must be 1–{maxlen} characters')
     return s
 
+from phone_auth import normalize_mobile, signup_identity, install_phone_auth
+install_phone_auth(conn)
+
 class Auth(BaseModel):
     name:str=''
-    email:str
+    email:str=''
+    mobile:str=''
     password:str
     referral_code:str=''
 class Listing(BaseModel):
@@ -100,13 +108,16 @@ def health():
     return {'status':'ok','database':'postgresql' if os.getenv('DATABASE_URL','').strip() else 'sqlite'}
 @app.post('/api/register')
 def register(data:Auth):
-    email=data.email.strip().lower()
-    if '@' not in email or len(email)>254 or len(data.password)<8: raise HTTPException(400,'Use a valid email and password of at least 8 characters')
+    email,mobile=signup_identity(data.email,data.mobile)
+    if not 8<=len(data.password)<=256:raise HTTPException(400,'Use a password of 8–256 characters.')
     salt=secrets.token_hex(16)
     with conn() as c:
         try:
             cur=c.execute('INSERT INTO users(name,email,salt,password_hash,created_at) VALUES (?,?,?,?,?)',(limited(data.name,70),email,salt,hashed(data.password,salt),int(time.time())))
-        except sqlite3.IntegrityError: raise HTTPException(409,'Email already registered')
+        except sqlite3.IntegrityError: raise HTTPException(409,'Email or mobile number already registered')
+        if mobile:
+            try:c.execute('INSERT INTO user_phones(user_id,phone) VALUES (?,?)',(cur.lastrowid,mobile))
+            except sqlite3.IntegrityError:raise HTTPException(409,'Mobile number already registered')
         c.execute('INSERT INTO ai_wallets(user_id,credits) VALUES (?,?)',(cur.lastrowid,10))
         c.execute('INSERT INTO credit_events(user_id,delta,reason,created_at) VALUES (?,?,?,?)',(cur.lastrowid,10,'signup demo credits',int(time.time())))
         ensure_rewards(c,cur.lastrowid)
@@ -120,7 +131,13 @@ def register(data:Auth):
 @app.post('/api/login')
 def login(data:Auth):
     with conn() as c:
-        r=c.execute('SELECT * FROM users WHERE email=?',(data.email.strip().lower(),)).fetchone()
+        identifier=(data.mobile or data.email).strip()
+        if '@' in identifier:
+            r=c.execute('SELECT * FROM users WHERE email=?',(identifier.lower(),)).fetchone()
+        else:
+            try:phone=normalize_mobile(identifier)
+            except HTTPException:raise HTTPException(401,'Invalid credentials')
+            r=c.execute('SELECT u.* FROM users u JOIN user_phones p ON p.user_id=u.id WHERE p.phone=?',(phone,)).fetchone()
         if not r or not hmac.compare_digest(hashed(data.password,r['salt']),r['password_hash']): raise HTTPException(401,'Invalid credentials')
         token=issue(c,r['id'])
     return {'token':token}
@@ -957,7 +974,7 @@ install_video(app, conn, admin_only, BASE)
 async def discovery_headers(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path.lower()
-    if path.startswith(("/api/", "/admin", "/super-admin")) or (path.startswith("/static/") and "admin" in path):
+    if path.startswith(("/api/", "/admin", "/super-admin", "/profile/", "/seller-form", "/marketplace/inquiries")) or (path.startswith("/static/") and "admin" in path):
         response.headers["X-Robots-Tag"] = "noindex, nofollow"
     return response
 
@@ -967,14 +984,18 @@ def public_about():
 
 @app.get('/robots.txt', include_in_schema=False)
 def discovery_robots():
-    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://wow-super-app.onrender.com/sitemap.xml\n", media_type='text/plain')
+    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin\nDisallow: /super-admin\nDisallow: /profile/\nDisallow: /seller-form\nDisallow: /marketplace/inquiries\nSitemap: https://wow-super-app.onrender.com/sitemap.xml\n",media_type='text/plain')
 
 @app.get('/sitemap.xml', include_in_schema=False)
 def discovery_sitemap():
-    paths = ['/', '/about']
-    urls = ''.join('<url><loc>https://wow-super-app.onrender.com' + path + '</loc></url>' for path in paths)
-    return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + urls + '</urlset>', media_type='application/xml')
-
+    from xml.sax.saxutils import escape
+    paths=['/','/about','/marketplace','/community','/members','/community-guidelines','/arcade','/jobs','/static/wow-nina.html','/static/wow-web-studio.html']
+    with conn() as c:
+        paths += ['/marketplace/'+str(r['id']) for r in c.execute('SELECT id FROM listings WHERE active=1 ORDER BY id DESC LIMIT 10000').fetchall()]
+        paths += ['/community/'+str(r['id']) for r in c.execute('SELECT id FROM posts WHERE active=1 ORDER BY id DESC LIMIT 10000').fetchall()]
+        paths += ['/members/'+r['handle'] for r in c.execute('SELECT handle FROM user_profiles WHERE is_public=1 ORDER BY updated_at DESC LIMIT 10000').fetchall()]
+    urls=''.join('<url><loc>'+escape('https://wow-super-app.onrender.com'+path)+'</loc></url>' for path in paths)
+    return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+urls+'</urlset>',media_type='application/xml')
 
 
 # Browser-only arcade. No user, wallet, or database mutations.
@@ -986,3 +1007,17 @@ def arcade_page():
 # Additive seller intake; existing user accounts and listings are preserved.
 from seller_forms import install_seller_forms
 install_seller_forms(app, conn, admin_only, BASE)
+
+# Public discovery and private member interactions; additive tables only.
+from profile_pages import install_profiles
+from marketplace_pages import install_marketplace
+from community_pages import install_community
+install_profiles(app, conn, user, BASE)
+install_marketplace(app, conn, user)
+install_community(app, conn, user)
+
+@app.get('/community-guidelines',include_in_schema=False)
+def community_guidelines():
+    from public_pages import page
+    return page('Islamic Community Guidelines','Respectful Islamic sharing, halal listings and safe community participation.','/community-guidelines',
+        '<span class="eyebrow">Faith · Family · Kindness</span><h1>Our community guidelines.</h1><section class="panel body-copy"><h2>Share with care</h2><p>Share Islamic reminders, duas, learning and useful family content respectfully. Cite reliable references when quoting the Qur’an or hadith. Do not present unverified member posts as religious rulings.</p><h2>Respect each other</h2><p>No hate, harassment, sectarian abuse, threats, explicit content, scams or impersonation. Keep disagreements thoughtful and respectful.</p><h2>Halal marketplace</h2><p>Offer lawful, halal products and services with honest prices, accurate descriptions and permission to use the photos. Gambling, prohibited products and deceptive listings are not allowed. A listing is not a halal certification or a guarantee of seller verification.</p><h2>Privacy &amp; profiles</h2><p>Publish a profile only when you choose. Keep private contact details and other people’s information out of posts and comments. Profiles have no audio.</p><h2>Member interactions</h2><p>Browsing and sharing public pages is open. Posting, liking, commenting and order inquiries require an account. Administrators can remove content that violates these guidelines.</p></section>')
