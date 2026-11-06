@@ -1,0 +1,21 @@
+.picture-sprite{display:block;background-image:url('/static/assets/wow-navigation-pictures.webp');background-repeat:no-repeat;background-size:500% 400%;aspect-ratio:1/1;background-color:#ddecff}.picture-directory{margin:32px 0 35px}.picture-directory h2{font-size:25px!important;margin:0 0 17px}.picture-links{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.picture-link{overflow:hidden;background:#fff;border:1px solid #d7e3f2;border-radius:16px;text-decoration:none!important;color:#172337;transition:transform .15s,box-shadow .15s}.picture-link:hover{transform:translateY(-3px);box-shadow:0 8px 24px #173d6c12}.picture-link .picture-sprite{width:100%;aspect-ratio:1/1}.picture-link-copy{display:block;padding:16px}.picture-link strong{display:block;font-size:16px;line-height:1.3}.picture-link small{display:block;margin-top:6px;font-size:12px!important;color:#536279!important;line-height:1.4}.section-picture{width:150px;height:150px;float:right;border-radius:15px;margin:0 0 18px 22px}.quran-picture-heading{display:flex;gap:18px;align-items:center;margin:36px 0 16px}.quran-picture-heading .picture-sprite{width:100px;border-radius:15px;flex-shrink:0}.quran-picture-heading h2{margin:0!important}.wow-addon:after{content:'';display:block;clear:both}.game-picture-button{display:block;width:100%;padding:0;border:0;border-radius:0;background:#ddecff;cursor:pointer}.game-picture-button .picture-sprite{width:100%;aspect-ratio:1/1}.game-picture-button:focus-visible,.picture-link:focus-visible{outline:3px solid #1765d1;outline-offset:4px}.news-picture-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin:25px 0}.news-picture-card{border:1px solid #d7e3f2;border-radius:13px;overflow:hidden;background:#fff}.news-picture-card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#edf4ff}.news-picture-copy{padding:17px}.news-picture-copy h3{font-size:19px!important;line-height:1.4!important;margin:12px 0!important}.news-picture-copy a{color:#1759b2!important;text-decoration:none}.news-picture-copy a:hover{text-decoration:underline}.news-picture-copy p{font-size:12px!important;line-height:1.6!important;color:#536279!important;overflow-wrap:anywhere}.news-photo-credit{font-size:10px!important;line-height:1.4;color:#5e6d82!important;display:block}@media(max-width:850px){.picture-links{grid-template-columns:repeat(3,minmax(0,1fr))}.news-picture-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:550px){.picture-links{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.picture-link-copy{padding:13px}.picture-link strong{font-size:15px}.picture-link:last-child{grid-column:1/-1;display:grid;grid-template-columns:110px 1fr;align-items:center}.picture-link:last-child .picture-sprite{width:110px}.section-picture{float:none;width:100%;height:auto;aspect-ratio:1/1;max-width:280px;margin:0 0 20px}.news-picture-grid{grid-template-columns:1fr}.quran-picture-heading .picture-sprite{width:85px}.game-picture-button .picture-sprite{aspect-ratio:1/1}}
+.picture-0{background-position:0% 0.000000%}
+.picture-1{background-position:25% 0.000000%}
+.picture-2{background-position:50% 0.000000%}
+.picture-3{background-position:75% 0.000000%}
+.picture-4{background-position:100% 0.000000%}
+.picture-5{background-position:0% 33.333333%}
+.picture-6{background-position:25% 33.333333%}
+.picture-7{background-position:50% 33.333333%}
+.picture-8{background-position:75% 33.333333%}
+.picture-9{background-position:100% 33.333333%}
+.picture-10{background-position:0% 66.666667%}
+.picture-11{background-position:25% 66.666667%}
+.picture-12{background-position:50% 66.666667%}
+.picture-13{background-position:75% 66.666667%}
+.picture-14{background-position:100% 66.666667%}
+.picture-15{background-position:0% 100.000000%}
+.picture-16{background-position:25% 100.000000%}
+.picture-17{background-position:50% 100.000000%}
+.picture-18{background-position:75% 100.000000%}
+.picture-19{background-position:100% 100.000000%}

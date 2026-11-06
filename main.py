@@ -625,6 +625,27 @@ def platform_mark_read(authorization:str|None=Header(None)):
     with conn() as c:c.execute('INSERT INTO admin_notifications_seen(admin_id,last_seen) VALUES(?,?) ON CONFLICT(admin_id) DO UPDATE SET last_seen=excluded.last_seen',(a['id'],int(time.time())))
     return {'ok':True}
 
+def rss_image_url(item):
+    """Use only HTTPS image URLs explicitly published in an RSS item."""
+    import urllib.parse, re, html
+    candidates=[]
+    for element in item.iter():
+        tag=element.tag.rsplit('}',1)[-1]
+        if tag in ('thumbnail','content','enclosure'):
+            url=element.attrib.get('url','')
+            kind=element.attrib.get('type','')
+            medium=element.attrib.get('medium','')
+            if tag=='thumbnail' or kind.startswith('image/') or medium=='image' or re.search(r'\.(?:jpe?g|png|webp)(?:[?#]|$)',url,re.I):
+                candidates.append(url)
+        if tag in ('description','encoded') and element.text:
+            candidates.extend(re.findall(r'<img[^>]+src=[\"\']([^\"\']+)',element.text,re.I)[:2])
+    for value in candidates:
+        value=html.unescape(value.strip())
+        parsed=urllib.parse.urlsplit(value)
+        if parsed.scheme=='https' and parsed.hostname and not parsed.username and len(value)<2000:
+            return value
+    return None
+
 @app.get('/api/news/daily')
 def daily_news():
     # Read-only public news: no fabricated stories. Short excerpts and publisher links.
@@ -640,7 +661,7 @@ def daily_news():
             for item in root.findall('./channel/item')[:7]:
                 title=(item.findtext('title') or '').strip();link=(item.findtext('link') or '').strip();published=(item.findtext('pubDate') or '').strip()
                 if title and link.startswith('https://'):
-                    stories.append({'title':title[:180],'url':link,'source':source,'region':'Philippines' if source in ('GMA News Philippines','Philippine News Agency') else 'World','published':published})
+                    stories.append({'title':title[:180],'url':link,'source':source,'region':'Philippines' if source in ('GMA News Philippines','Philippine News Agency') else 'World','published':published,'image_url':rss_image_url(item)})
         except Exception:continue
     return {'stories':stories[:24],'updated_at':int(time.time()),'live':bool(stories),'message':'Headlines supplied by their publishers. Feed may be unavailable; no stories are invented.'}
 
