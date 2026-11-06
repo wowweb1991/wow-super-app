@@ -981,3 +981,8 @@ def discovery_sitemap():
 @app.get('/arcade', include_in_schema=False)
 def arcade_page():
     return FileResponse(os.path.join(BASE, 'static', 'arcade.html'))
+
+
+# Additive seller intake; existing user accounts and listings are preserved.
+from seller_forms import install_seller_forms
+install_seller_forms(app, conn, admin_only, BASE)
