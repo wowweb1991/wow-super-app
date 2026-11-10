@@ -22,9 +22,9 @@ android {
         signingConfigs {
             create("upload") {
                 storeFile = file(signingPath!!)
-                storePassword = signingPassword
-                keyAlias = signingAlias
-                keyPassword = signingKeyPassword
+                storePassword = signingPassword!!
+                keyAlias = signingAlias!!
+                keyPassword = signingKeyPassword!!
             }
         }
     }
