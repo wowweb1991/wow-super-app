@@ -64,7 +64,8 @@ jobs:
           test -s app/build/outputs/bundle/release/app-release.aab
           echo "Android APK and AAB generated successfully."
           if [ "${SIGNED_BUILD:-false}" = "true" ]; then
-            echo "Release signing secrets were configured."
+            jarsigner -verify -strict app/build/outputs/bundle/release/app-release.aab
+            echo "Release AAB signature verified."
           else
             echo "::notice::Release AAB is unsigned and MUST NOT be uploaded to Google Play."
           fi
