@@ -36,11 +36,30 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Compile Android app (unsigned release)
+      - name: Configure optional upload signing
+        shell: bash
+        env:
+          WOW_KEYSTORE_BASE64: ${{ secrets.WOW_KEYSTORE_BASE64 }}
+          WOW_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.WOW_UPLOAD_KEYSTORE_PASSWORD }}
+          WOW_UPLOAD_KEY_ALIAS: ${{ secrets.WOW_UPLOAD_KEY_ALIAS }}
+          WOW_UPLOAD_KEY_PASSWORD: ${{ secrets.WOW_UPLOAD_KEY_PASSWORD }}
+        run: |
+          if [ -n "$WOW_KEYSTORE_BASE64" ] && [ -n "$WOW_UPLOAD_KEYSTORE_PASSWORD" ] && [ -n "$WOW_UPLOAD_KEY_ALIAS" ] && [ -n "$WOW_UPLOAD_KEY_PASSWORD" ]; then
+            printf '%s' "$WOW_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/wow-upload.jks"
+            echo "WOW_UPLOAD_KEYSTORE_PATH=$RUNNER_TEMP/wow-upload.jks" >> "$GITHUB_ENV"
+            echo "WOW_UPLOAD_KEYSTORE_PASSWORD=$WOW_UPLOAD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "WOW_UPLOAD_KEY_ALIAS=$WOW_UPLOAD_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "WOW_UPLOAD_KEY_PASSWORD=$WOW_UPLOAD_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "SIGNED_BUILD=true" >> "$GITHUB_ENV"
+          else
+            echo "SIGNED_BUILD=false" >> "$GITHUB_ENV"
+            echo "No upload signing secrets configured; building validation-only unsigned release."
+          fi
+      - name: Compile Android app
         run: gradle :app:assembleDebug :app:bundleRelease
       - uses: actions/upload-artifact@v4
         with:
-          name: wow-android-validation-unsigned
+          name: wow-android-build
           path: |
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/outputs/bundle/release/*.aab
