@@ -220,7 +220,7 @@ def ai_provider_config():
 
 def provider_text(prompt, language, tool):
     provider, key = ai_provider_config()
-    if not key:
+    if provider != 'ollama' and not key:
         raise HTTPException(503, 'AI provider is not connected. No credits charged.')
     instructions = (
         f'Write {tool} content in {language}. Use only supplied business facts. '
@@ -228,7 +228,17 @@ def provider_text(prompt, language, tool):
         'For video_script provide scenes, voiceover and on-screen text. Return a draft for human review.'
     )
     headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key}
-    if provider == 'gemini':
+    if provider == 'ollama':
+        url = 'http://127.0.0.1:11434/api/generate'
+        headers = {'Content-Type': 'application/json'}
+        body = {
+            'model': os.getenv('OLLAMA_TEXT_MODEL', 'gemma3:4b'),
+            'prompt': prompt,
+            'system': instructions,
+            'stream': False,
+            'options': {'num_predict': 1000},
+        }
+    elif provider == 'gemini':
         model = os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash')
         if not re.fullmatch(r'[a-zA-Z0-9._-]+', model):
             raise HTTPException(503, 'Invalid Gemini model configuration. No credits charged.')
@@ -258,7 +268,9 @@ def provider_text(prompt, language, tool):
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             data = json.load(response)
-        if provider == 'gemini':
+        if provider == 'ollama':
+            result = data.get('response', '')
+        elif provider == 'gemini':
             parts = (data.get('candidates') or [{}])[0].get('content', {}).get('parts', [])
             result = '\n'.join(part.get('text', '') for part in parts if not part.get('thought'))
         elif provider == 'groq':
@@ -277,7 +289,8 @@ def provider_text(prompt, language, tool):
 
 @app.get('/api/ai/tools')
 def ai_tools():
-    connected=bool(ai_provider_config()[1])
+    provider, key = ai_provider_config()
+    connected = provider == 'ollama' or bool(key)
     return {'tools':[{'id':k,'credits':v,'mode':('ai' if connected else 'provider-required') if k in TEXT_TOOLS else 'coming-soon'} for k,v in AI_TOOLS.items()],'payments_live':False,'provider_connected':connected}
 @app.get('/ai-services')
 def ai_page():return FileResponse(os.path.join(BASE,'static','ai-services.html'))
