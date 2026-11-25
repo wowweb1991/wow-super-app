@@ -102,6 +102,24 @@ class Moderation(BaseModel):
 
 @app.get('/')
 def home():return FileResponse(os.path.join(BASE,'static','index.html'))
+@app.get('/manifest.json', include_in_schema=False)
+def omni_manifest():
+    return FileResponse(os.path.join(BASE, 'manifest.json'), media_type='application/manifest+json')
+
+@app.get('/sw.js', include_in_schema=False)
+def omni_service_worker():
+    return FileResponse(os.path.join(BASE, 'sw.js'), media_type='application/javascript', headers={'Cache-Control':'no-cache'})
+
+@app.get('/offline.html', include_in_schema=False)
+def omni_offline():
+    return FileResponse(os.path.join(BASE, 'offline.html'), media_type='text/html')
+
+@app.get('/icons/{filename}', include_in_schema=False)
+def omni_icon(filename: str):
+    if filename not in ('icon-192.png', 'icon-512.png'):
+        raise HTTPException(404, 'Icon not found')
+    return FileResponse(os.path.join(BASE, 'icons', filename), media_type='image/png')
+
 @app.get('/api/health')
 def health():
     with conn() as c:c.execute('SELECT 1').fetchone()
