@@ -207,23 +207,77 @@ class AIInput(BaseModel):
     prompt:str=Field(min_length=3,max_length=800)
     language:str='English'
 
-def provider_text(prompt,language,tool):
-    key=os.getenv('OPENAI_API_KEY','')
-    if not key:raise HTTPException(503,'AI provider is not connected. No credits charged.')
-    body=json.dumps({'model':os.getenv('OPENAI_TEXT_MODEL','gpt-4.1-mini'),'store':False,'max_output_tokens':1000,
-        'instructions':f'Write {tool} content in {language}. Use only supplied business facts. Do not invent prices, links, guarantees or testimonials. For video_script provide scenes, voiceover and on-screen text. Return a draft for human review.',
-        'input':prompt}).encode()
-    req=urllib.request.Request('https://api.openai.com/v1/responses',data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+AI_PROVIDER_KEYS = {
+    'openai': 'OPENAI_API_KEY',
+    'gemini': 'GEMINI_API_KEY',
+    'groq': 'GROQ_API_KEY',
+}
+
+def ai_provider_config():
+    provider = os.getenv('AI_TEXT_PROVIDER', 'openai').strip().lower()
+    key_name = AI_PROVIDER_KEYS.get(provider)
+    return provider, os.getenv(key_name, '').strip() if key_name else ''
+
+def provider_text(prompt, language, tool):
+    provider, key = ai_provider_config()
+    if not key:
+        raise HTTPException(503, 'AI provider is not connected. No credits charged.')
+    instructions = (
+        f'Write {tool} content in {language}. Use only supplied business facts. '
+        'Do not invent prices, links, guarantees or testimonials. '
+        'For video_script provide scenes, voiceover and on-screen text. Return a draft for human review.'
+    )
+    headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key}
+    if provider == 'gemini':
+        model = os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash')
+        if not re.fullmatch(r'[a-zA-Z0-9._-]+', model):
+            raise HTTPException(503, 'Invalid Gemini model configuration. No credits charged.')
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': key}
+        body = {
+            'systemInstruction': {'parts': [{'text': instructions}]},
+            'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+            'generationConfig': {'maxOutputTokens': 1000},
+        }
+    elif provider == 'groq':
+        url = 'https://api.groq.com/openai/v1/chat/completions'
+        body = {
+            'model': os.getenv('GROQ_TEXT_MODEL', 'llama-3.3-70b-versatile'),
+            'messages': [{'role': 'system', 'content': instructions}, {'role': 'user', 'content': prompt}],
+            'temperature': 0.4,
+            'max_completion_tokens': 1000,
+        }
+    else:
+        url = 'https://api.openai.com/v1/responses'
+        body = {
+            'model': os.getenv('OPENAI_TEXT_MODEL', 'gpt-4.1-mini'), 'store': False,
+            'max_output_tokens': 1000, 'instructions': instructions, 'input': prompt,
+        }
+
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     try:
-        with urllib.request.urlopen(req,timeout=45) as response:data=json.load(response)
-    except (urllib.error.URLError,TimeoutError,ValueError):raise HTTPException(502,'AI provider unavailable. No credits charged.')
-    text='\n'.join(part.get('text','') for item in data.get('output',[]) for part in item.get('content',[]) if part.get('type')=='output_text').strip()
-    if not text:raise HTTPException(502,'AI provider returned no text. No credits charged.')
-    return text
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = json.load(response)
+        if provider == 'gemini':
+            parts = (data.get('candidates') or [{}])[0].get('content', {}).get('parts', [])
+            result = '\n'.join(part.get('text', '') for part in parts if not part.get('thought'))
+        elif provider == 'groq':
+            result = (data.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+        else:
+            result = '\n'.join(
+                part.get('text', '') for item in data.get('output', []) for part in item.get('content', [])
+                if part.get('type') == 'output_text'
+            )
+        result = result.strip()
+    except (urllib.error.URLError, TimeoutError, ValueError, AttributeError, TypeError):
+        raise HTTPException(502, 'AI provider unavailable. No credits charged.')
+    if not result:
+        raise HTTPException(502, 'AI provider returned no text. No credits charged.')
+    return result
 
 @app.get('/api/ai/tools')
 def ai_tools():
-    connected=bool(os.getenv('OPENAI_API_KEY'))
+    connected=bool(ai_provider_config()[1])
     return {'tools':[{'id':k,'credits':v,'mode':('ai' if connected else 'provider-required') if k in TEXT_TOOLS else 'coming-soon'} for k,v in AI_TOOLS.items()],'payments_live':False,'provider_connected':connected}
 @app.get('/ai-services')
 def ai_page():return FileResponse(os.path.join(BASE,'static','ai-services.html'))
