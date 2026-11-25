@@ -213,13 +213,24 @@ AI_PROVIDER_KEYS = {
     'groq': 'GROQ_API_KEY',
 }
 
-def ai_provider_config():
-    provider = os.getenv('AI_TEXT_PROVIDER', 'openai').strip().lower()
+def ai_provider_config(setting='AI_TEXT_PROVIDER', default='openai'):
+    provider = os.getenv(setting, default).strip().lower()
     key_name = AI_PROVIDER_KEYS.get(provider)
     return provider, os.getenv(key_name, '').strip() if key_name else ''
 
 def provider_text(prompt, language, tool):
     provider, key = ai_provider_config()
+    try:
+        return request_provider_text(provider, key, prompt, language, tool)
+    except HTTPException as error:
+        if error.status_code != 429:
+            raise
+        fallback, fallback_key = ai_provider_config('AI_TEXT_FALLBACK_PROVIDER', '')
+        if fallback == provider or (fallback != 'ollama' and not fallback_key):
+            raise
+        return request_provider_text(fallback, fallback_key, prompt, language, tool)
+
+def request_provider_text(provider, key, prompt, language, tool):
     if provider != 'ollama' and not key:
         raise HTTPException(503, 'AI provider is not connected. No credits charged.')
     instructions = (
@@ -281,6 +292,10 @@ def provider_text(prompt, language, tool):
                 if part.get('type') == 'output_text'
             )
         result = result.strip()
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise HTTPException(429, 'AI provider rate limit reached. No credits charged.')
+        raise HTTPException(502, 'AI provider unavailable. No credits charged.')
     except (urllib.error.URLError, TimeoutError, ValueError, AttributeError, TypeError):
         raise HTTPException(502, 'AI provider unavailable. No credits charged.')
     if not result:
