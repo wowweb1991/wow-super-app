@@ -10,6 +10,14 @@ DB=os.getenv('DATABASE_PATH',os.path.join(BASE,'wow.db'))
 app=FastAPI(title='WOW Super App API',docs_url='/api/docs')
 app.mount('/static', StaticFiles(directory=os.path.join(BASE, 'static')), name='static')
 
+@app.middleware("http")
+async def retired_hiring(request: Request, call_next):
+    path = request.url.path.rstrip('/').lower()
+    if any(path == prefix or path.startswith(prefix + '/') for prefix in ('/jobs', '/api/jobs', '/api/admin/jobs', '/static/jobs.html')):
+        return Response(status_code=410)
+    return await call_next(request)
+
+
 from wow_database import connect
 
 def conn():
@@ -469,104 +477,6 @@ def daily_quran():
     return {'date':str(ph),'surah':surah,'reference':ref,'english_excerpt':meaning,'source_url':'https://quran.com/'+ref,'note':'Selected verse excerpt; visit Quran.com for full Arabic text, translation and context.'}
 
 
-# WOW JOBS: any registered user may post; posts are explicitly unverified.
-def init_jobs():
-    with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),title TEXT NOT NULL,description TEXT NOT NULL,location TEXT NOT NULL,job_type TEXT NOT NULL,salary TEXT NOT NULL,contact TEXT NOT NULL,created_at INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS job_applications(id INTEGER PRIMARY KEY,job_id INTEGER NOT NULL REFERENCES jobs(id),applicant_id INTEGER NOT NULL REFERENCES users(id),message TEXT NOT NULL,contact TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(job_id,applicant_id));
-        CREATE TABLE IF NOT EXISTS job_reports(id INTEGER PRIMARY KEY,job_id INTEGER NOT NULL REFERENCES jobs(id),reporter_id INTEGER NOT NULL REFERENCES users(id),reason TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(job_id,reporter_id));
-        CREATE INDEX IF NOT EXISTS idx_jobs_active ON jobs(active,created_at);
-        """)
-init_jobs()
-
-class JobIn(BaseModel):
-    title:str
-    description:str
-    location:str
-    job_type:str='Other'
-    salary:str='Negotiable'
-    contact:str
-
-class JobApplicationIn(BaseModel):
-    message:str
-    contact:str
-
-class JobReportIn(BaseModel):
-    reason:str
-
-@app.get('/jobs')
-def jobs_page():
-    return FileResponse(os.path.join(BASE,'static','jobs.html'))
-
-@app.get('/api/jobs')
-def browse_jobs(q:str='',page:int=1,job_type:str=''):
-    page=max(1,min(page,1000));q=q.strip()[:80];job_type=job_type.strip()[:40]
-    with conn() as c:
-        rows=c.execute("""SELECT j.id,j.title,j.description,j.location,j.job_type,j.salary,j.contact,j.created_at,u.name AS posted_by,0 AS employer_verified FROM jobs j JOIN users u ON u.id=j.user_id WHERE j.active=1 AND (j.title LIKE ? OR j.description LIKE ? OR j.location LIKE ?) AND (?='' OR j.job_type=?) ORDER BY j.created_at DESC,j.id DESC LIMIT 30 OFFSET ?""",(f'%{q}%',f'%{q}%',f'%{q}%',job_type,job_type,(page-1)*30)).fetchall()
-    return [dict(r) for r in rows]
-
-@app.post('/api/jobs')
-def create_job(data:JobIn,authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c:
-        r=c.execute('INSERT INTO jobs(user_id,title,description,location,job_type,salary,contact,created_at) VALUES (?,?,?,?,?,?,?,?)',(u['id'],limited(data.title,120),limited(data.description,3000),limited(data.location,120),limited(data.job_type,40),limited(data.salary,100),limited(data.contact,180),int(time.time())))
-    return {'id':r.lastrowid,'employer_verified':False}
-
-@app.get('/api/jobs/mine')
-def my_jobs(authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c: rows=c.execute('SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC',(u['id'],)).fetchall()
-    return [dict(r) for r in rows]
-
-@app.delete('/api/jobs/{job_id}')
-def delete_job(job_id:int,authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c:
-        r=c.execute('SELECT user_id FROM jobs WHERE id=?',(job_id,)).fetchone()
-        if not r:raise HTTPException(404,'Job not found')
-        if r['user_id']!=u['id'] and u['role']!='admin':raise HTTPException(403,'Not your job')
-        c.execute('UPDATE jobs SET active=0 WHERE id=?',(job_id,))
-    return {'ok':True}
-
-@app.post('/api/jobs/{job_id}/apply')
-def apply_job(job_id:int,data:JobApplicationIn,authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c:
-        job=c.execute('SELECT user_id FROM jobs WHERE id=? AND active=1',(job_id,)).fetchone()
-        if not job:raise HTTPException(404,'Job not found')
-        if job['user_id']==u['id']:raise HTTPException(400,'Cannot apply to your own job')
-        try:
-            r=c.execute('INSERT INTO job_applications(job_id,applicant_id,message,contact,created_at) VALUES (?,?,?,?,?)',(job_id,u['id'],limited(data.message,2000),limited(data.contact,180),int(time.time())))
-        except sqlite3.IntegrityError:raise HTTPException(409,'Already applied')
-    return {'id':r.lastrowid,'status':'submitted'}
-
-@app.get('/api/jobs/{job_id}/applications')
-def job_applications(job_id:int,authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c:
-        job=c.execute('SELECT user_id FROM jobs WHERE id=?',(job_id,)).fetchone()
-        if not job:raise HTTPException(404,'Job not found')
-        if job['user_id']!=u['id'] and u['role']!='admin':raise HTTPException(403)
-        rows=c.execute('SELECT a.id,a.message,a.contact,a.created_at,u.name AS applicant FROM job_applications a JOIN users u ON u.id=a.applicant_id WHERE a.job_id=? ORDER BY a.created_at DESC',(job_id,)).fetchall()
-    return [dict(r) for r in rows]
-
-@app.post('/api/jobs/{job_id}/report')
-def report_job(job_id:int,data:JobReportIn,authorization:str|None=Header(None)):
-    u=user(authorization)
-    with conn() as c:
-        if not c.execute('SELECT id FROM jobs WHERE id=? AND active=1',(job_id,)).fetchone():raise HTTPException(404)
-        try:c.execute('INSERT INTO job_reports(job_id,reporter_id,reason,created_at) VALUES (?,?,?,?)',(job_id,u['id'],limited(data.reason,500),int(time.time())))
-        except sqlite3.IntegrityError:raise HTTPException(409,'Already reported')
-    return {'status':'reported'}
-
-@app.get('/api/admin/jobs/reports')
-def admin_job_reports(authorization:str|None=Header(None)):
-    admin_only(authorization)
-    with conn() as c: rows=c.execute('SELECT r.id,r.job_id,r.reason,r.created_at,j.title FROM job_reports r JOIN jobs j ON j.id=r.job_id ORDER BY r.created_at DESC LIMIT 200').fetchall()
-    return [dict(r) for r in rows]
-
-
 # WOW NINA product catalog (admin managed)
 def init_nina():
     with conn() as c:
@@ -716,7 +626,6 @@ def platform_overview(authorization:str|None=Header(None)):
             'community_posts':'SELECT COUNT(*) FROM posts WHERE active=1',
             'marketplace_listings':'SELECT COUNT(*) FROM listings WHERE active=1',
             'services':'SELECT COUNT(*) FROM services WHERE active=1',
-            'jobs':'SELECT COUNT(*) FROM jobs WHERE active=1',
             'pending_referrals':"SELECT COUNT(*) FROM referrals WHERE status='pending'",
             'pending_withdrawals':"SELECT COUNT(*) FROM reward_claims WHERE status='pending'",
             'digital_products':'SELECT COUNT(*) FROM digital_products WHERE active=1',
@@ -725,7 +634,7 @@ def platform_overview(authorization:str|None=Header(None)):
             try:stats[name]=c.execute(query).fetchone()[0]
             except sqlite3.OperationalError:stats[name]=0
         events=[]
-        sources=[('signup','SELECT id,name AS detail,created_at FROM users'),('community','SELECT id,body AS detail,created_at FROM posts'),('marketplace','SELECT id,title AS detail,created_at FROM listings'),('service','SELECT id,title AS detail,created_at FROM services'),('referral','SELECT id,status AS detail,created_at FROM referrals'),('withdrawal','SELECT id,status AS detail,created_at FROM reward_claims'),('job','SELECT id,title AS detail,created_at FROM jobs')]
+        sources=[('signup','SELECT id,name AS detail,created_at FROM users'),('community','SELECT id,body AS detail,created_at FROM posts'),('marketplace','SELECT id,title AS detail,created_at FROM listings'),('service','SELECT id,title AS detail,created_at FROM services'),('referral','SELECT id,status AS detail,created_at FROM referrals'),('withdrawal','SELECT id,status AS detail,created_at FROM reward_claims')]
         for kind,q in sources:
             try:
                 for r in c.execute(q+' ORDER BY created_at DESC LIMIT 30').fetchall():events.append({'type':kind,'id':r['id'],'detail':str(r['detail'])[:140],'created_at':r['created_at']})
@@ -967,7 +876,7 @@ def marketing_video(draft_id:int,authorization:str|None=Header(None)):
         data=pathlib.Path(output).read_bytes()
     return StreamingResponse(BytesIO(data),media_type='video/mp4',headers={'Content-Disposition':f'attachment; filename="wow-ad-{draft_id}.mp4"'})
 
-# One admin entry point for platform overview, AI and hiring moderation.
+# One admin entry point for platform overview, AI moderation.
 @app.get('/super-admin')
 @app.get('/admin/super')
 def unified_admin_alias():
@@ -976,29 +885,6 @@ def unified_admin_alias():
 @app.get('/admin/rewards')
 def rewards_admin_page():
     return FileResponse(os.path.join(BASE,'static','rewards-admin.html'))
-
-@app.get('/api/admin/jobs')
-def admin_jobs(page:int=1,q:str='',authorization:str|None=Header(None)):
-    admin_only(authorization)
-    page=max(1,min(page,1000));term='%'+q.strip()[:80]+'%'
-    with conn() as c:
-        total=c.execute('SELECT COUNT(*) FROM jobs WHERE title LIKE ? OR location LIKE ?',(term,term)).fetchone()[0]
-        rows=c.execute('''SELECT j.*,u.name AS posted_by,
-            (SELECT COUNT(*) FROM job_applications a WHERE a.job_id=j.id) AS applications,
-            (SELECT COUNT(*) FROM job_reports r WHERE r.job_id=j.id) AS reports
-            FROM jobs j JOIN users u ON u.id=j.user_id
-            WHERE j.title LIKE ? OR j.location LIKE ?
-            ORDER BY j.created_at DESC,j.id DESC LIMIT 30 OFFSET ?''',(term,term,(page-1)*30)).fetchall()
-    return {'jobs':[dict(r) for r in rows],'page':page,'total':total}
-
-@app.post('/api/admin/jobs/{job_id}/close')
-def admin_close_job(job_id:int,authorization:str|None=Header(None)):
-    admin_only(authorization)
-    with conn() as c:
-        cur=c.execute('UPDATE jobs SET active=0 WHERE id=?',(job_id,))
-        if not cur.rowcount:raise HTTPException(404,'Job not found')
-    return {'ok':True,'active':False}
-
 
 @app.get('/admin/login')
 def admin_login_page():
@@ -1089,7 +975,7 @@ def discovery_robots():
 @app.get('/sitemap.xml', include_in_schema=False)
 def discovery_sitemap():
     from xml.sax.saxutils import escape
-    paths=['/','/about','/marketplace','/community','/members','/community-guidelines','/arcade','/jobs','/static/wow-nina.html','/static/wow-web-studio.html']
+    paths=['/','/about','/marketplace','/community','/members','/community-guidelines','/arcade','/static/wow-nina.html','/static/wow-web-studio.html']
     with conn() as c:
         paths += ['/marketplace/'+str(r['id']) for r in c.execute('SELECT id FROM listings WHERE active=1 ORDER BY id DESC LIMIT 10000').fetchall()]
         paths += ['/community/'+str(r['id']) for r in c.execute('SELECT id FROM posts WHERE active=1 ORDER BY id DESC LIMIT 10000').fetchall()]
