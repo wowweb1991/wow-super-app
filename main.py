@@ -126,7 +126,27 @@ def omni_offline():
 def omni_icon(filename: str):
     if filename not in ('icon-192.png', 'icon-512.png'):
         raise HTTPException(404, 'Icon not found')
-    return FileResponse(os.path.join(BASE, 'icons', filename), media_type='image/png')
+    # Generate deterministic PNG icons without external dependencies.
+    import struct, zlib
+    size = 192 if filename == 'icon-192.png' else 512
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    rows = bytearray()
+    segments = ((.24,.35,.36,.65),(.36,.65,.50,.43),(.50,.43,.64,.65),(.64,.65,.76,.35))
+    for y in range(size):
+        rows.append(0)
+        for x in range(size):
+            px, py = (x+.5)/size, (y+.5)/size
+            color = (11,15,25)
+            for ax,ay,bx,by in segments:
+                dx,dy=bx-ax,by-ay
+                t=max(0,min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy)))
+                if (px-ax-t*dx)**2+(py-ay-t*dy)**2 < .036**2:
+                    color=(45,155,255)
+                    break
+            rows.extend(color)
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB',size,size,8,2,0,0,0)) + chunk(b'IDAT',zlib.compress(rows)) + chunk(b'IEND',b'')
+    return Response(png, media_type='image/png', headers={'Cache-Control':'public, max-age=86400'})
 
 @app.get('/api/health')
 def health():
